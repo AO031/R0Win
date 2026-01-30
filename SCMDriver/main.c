@@ -77,13 +77,15 @@ int main()  {
 			break;
 		}
 		case MENU_EXIT: {
-			exit(0);
+			continueRunning = FALSE;
+			break;
 		}
 		default: {
 			printf("Invalid Choice\n");
 		}
 		}
 	}
+	printf("Thanks For Using!@!\n");
 }
 
 BOOL ReadIntInput(INT* menuchoice)
