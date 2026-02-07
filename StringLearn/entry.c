@@ -214,7 +214,6 @@ cleanup:
 	if (st == STATUS_BUFFER_OVERFLOW) DbgPrint("[W] STATUS_BUFFER_OVERFLOW\n");
 	if (destBuffer[RTL_NUMBER_OF(destBuffer) - 1] != L'\0') DbgPrint("[W] RtlStringCchCopyW Failed\n");
 		
-	*/
 	WCHAR destBuffer[8] = { 0 };
 	st = RtlStringCchCatW(destBuffer, 8, L"Hello");
 	if (st == STATUS_BUFFER_OVERFLOW) DbgPrint("[W] STATUS_BUFFER_OVERFLOW\n");
@@ -222,6 +221,15 @@ cleanup:
 	WCHAR snBuffer[8] = { 0 };
 	st = RtlStringCchPrintfW(snBuffer, 8, L"1+1=%d", 2);
 	if (st == STATUS_BUFFER_OVERFLOW) DbgPrint("[W] STATUS_BUFFER_OVERFLOW\n");
+
+
+	UNICODE_STRING ustr1, ustr2;
+
+	RtlInitUnicodeString(&ustr1, L"Hello");
+	RtlInitUnicodeString(&ustr2, L"World");
+	DbgBreakPoint();
+	RtlCopyUnicodeString(&ustr1, &ustr2);
+	*/
 
 	return STATUS_SUCCESS;
 }
