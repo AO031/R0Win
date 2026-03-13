@@ -1,6 +1,8 @@
 #include <ntifs.h>
 #include <ntstrsafe.h>
 
+#define TEST_THREAD_COUNT 3
+
 BOOLEAN g_bDriverUnload = FALSE;
 
 NTSTATUS TestThreadObjectAndId() {
@@ -241,6 +243,659 @@ ret:
 	return st;
 }
 
+typedef struct {
+	PKEVENT pEvent;
+	int threadIndex;
+}EventContext;
+
+VOID EventNotificationRoutine(PVOID context) {
+	EventContext* ctx = (EventContext*)context;
+	LARGE_INTEGER timeout = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
+
+	timeout.QuadPart = -100000000LL;
+	st = KeWaitForSingleObject(ctx->pEvent, Executive, KernelMode, FALSE, &timeout);
+
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[E] Thread %d Timeout\n", ctx->threadIndex);
+		ExFreePool(ctx);
+		PsTerminateSystemThread(st);
+		return;
+	}
+
+	DbgPrint("[W] Thread %d Is Working\n", ctx->threadIndex);
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+NTSTATUS TestEventNotification() {
+	KEVENT kevent = { 0 };
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+	HANDLE threadHandle[TEST_THREAD_COUNT] = { 0 };
+	EventContext* ctx[TEST_THREAD_COUNT] = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	LARGE_INTEGER delay = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	KeInitializeEvent(&kevent, NotificationEvent, FALSE);
+
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		ctx[i] = (EventContext*)ExAllocatePool(NonPagedPool, sizeof(EventContext));
+		if (!ctx[i]) {
+			st = STATUS_INSUFFICIENT_RESOURCES;
+			goto ret;
+		}
+
+		ctx[i]->pEvent = &kevent;
+		ctx[i]->threadIndex = i;
+
+		st = PsCreateSystemThread(
+			&threadHandle[i],
+			THREAD_ALL_ACCESS,
+			&objAttr,
+			NULL,
+			NULL,
+			EventNotificationRoutine,
+			ctx[i]
+		);
+		if (!NT_SUCCESS(st)) {
+			DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", i, st);
+			goto ret;
+		}
+
+	}
+
+	delay.QuadPart = -20000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	DbgPrint("[W] Start To Set Event\n");
+	KeSetEvent(&kevent, IO_NO_INCREMENT, FALSE);
+
+	delay.QuadPart = -20000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+ret:
+	timeout.QuadPart = -100000000LL;
+	for (ULONG i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) {
+			ZwWaitForSingleObject(threadHandle[i], FALSE, NULL); // Infinite wait
+		}
+	}
+
+	// Close handles and free contexts
+	for (ULONG i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) ZwClose(threadHandle[i]);
+	}
+	return st;
+}
+
+VOID EventSynchronizationRoutine(PVOID context) {
+	EventContext* ctx = (EventContext*)context;
+	LARGE_INTEGER timeout = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
+
+	timeout.QuadPart = -200000000LL;
+	st = KeWaitForSingleObject(ctx->pEvent, Executive, KernelMode, FALSE, &timeout);
+
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[E] Thread %d Timeout\n", ctx->threadIndex);
+		ExFreePool(ctx);
+		PsTerminateSystemThread(st);
+		return;
+	}
+
+	DbgPrint("[W] Thread %d Is Working\n", ctx->threadIndex);
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+NTSTATUS TestEventSynchronization() {
+	KEVENT kevent = { 0 };
+	EventContext* ctx[TEST_THREAD_COUNT] = { 0 };
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+	HANDLE threadHandle[TEST_THREAD_COUNT] = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	LARGE_INTEGER delay = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	KeInitializeEvent(&kevent, SynchronizationEvent, FALSE);
+
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		ctx[i] = (EventContext*)ExAllocatePool(NonPagedPool, sizeof(EventContext));
+		if (!ctx[i]) {
+			st = STATUS_INSUFFICIENT_RESOURCES;
+			goto ret;
+		}
+
+		ctx[i]->pEvent = &kevent;
+		ctx[i]->threadIndex = i;
+
+		st = PsCreateSystemThread(
+			&threadHandle[i],
+			THREAD_ALL_ACCESS,
+			&objAttr,
+			NULL,
+			NULL,
+			EventSynchronizationRoutine,
+			ctx[i]
+		);
+		if (!NT_SUCCESS(st)) {
+			DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", i, st);
+			goto ret;
+		}
+	}
+
+	delay.QuadPart = -20000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	for (int i = 0; i < 3; i++) {
+		DbgPrint("[W] Start To Set Event %d\n",i);
+		KeSetEvent(&kevent, IO_NO_INCREMENT, FALSE);
+		delay.QuadPart = -20000000LL;
+		KeDelayExecutionThread(KernelMode, FALSE, &delay);
+	}
+	
+
+	delay.QuadPart = -20000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+ret:
+	timeout.QuadPart = -100000000LL;
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) {
+			ZwWaitForSingleObject(threadHandle[i], FALSE, NULL);
+		}
+	}
+
+	// Close handles and free contexts
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) ZwClose(threadHandle[i]);
+		
+	}
+	return st;
+}
+
+typedef struct {
+	PKSEMAPHORE pSemaphore;
+	int threadIndex;
+}SemaphoreContext;
+
+VOID SemaphoreThreadRoutine(PVOID context) {
+	SemaphoreContext* ctx = (SemaphoreContext*)context;
+	LARGE_INTEGER timeout = { 0 };
+	LARGE_INTEGER delay = { 0 };
+	LONG previousCount = 0;
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
+
+	timeout.QuadPart = -500000000LL;
+	st = KeWaitForSingleObject(ctx->pSemaphore, Executive, KernelMode, FALSE, &timeout);
+
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[E] Thread %d Timeout\n", ctx->threadIndex);
+		ExFreePool(ctx);
+		PsTerminateSystemThread(st);
+		return;
+	}
+
+	DbgPrint("[W] Thread %d Is Working\n", ctx->threadIndex);
+	delay.QuadPart = -2000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	previousCount = KeReleaseSemaphore(ctx->pSemaphore, IO_NO_INCREMENT, 1, FALSE);
+	DbgPrint("[W] Thread %d KeReleaseSemaphore Success Count:%d\n", ctx->threadIndex, previousCount);
+
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+NTSTATUS TestSemaphore() {
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+	HANDLE threadHandle[TEST_THREAD_COUNT] = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	LARGE_INTEGER delay = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+	KSEMAPHORE ksemaphore = { 0 };
+	SemaphoreContext* ctx[TEST_THREAD_COUNT] = { 0 };
+
+	KeInitializeSemaphore(&ksemaphore, 2, 2);
+
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		ctx[i] = (SemaphoreContext*)ExAllocatePool(NonPagedPool, sizeof(SemaphoreContext));
+		if (!ctx[i]) {
+			st = STATUS_INSUFFICIENT_RESOURCES;
+			goto ret;
+		}
+
+		ctx[i]->pSemaphore = &ksemaphore;
+		ctx[i]->threadIndex = i;
+
+		st = PsCreateSystemThread(
+			&threadHandle[i],
+			THREAD_ALL_ACCESS,
+			&objAttr,
+			NULL,
+			NULL,
+			SemaphoreThreadRoutine,
+			ctx[i]
+		);
+		if (!NT_SUCCESS(st)) {
+			DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", i, st);
+			goto ret;
+		}
+	}
+
+	delay.QuadPart = -20000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+ret:
+	timeout.QuadPart = -100000000LL;
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) {
+			ZwWaitForSingleObject(threadHandle[i], FALSE, NULL);
+		}
+	}
+
+	// Close handles and free contexts
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) ZwClose(threadHandle[i]);
+	}
+	return st;
+}
+
+typedef struct {
+	PKMUTEX pMutex;
+	int threadIndex;
+	PLONG sharePointer;
+}MutexContext;
+
+VOID MutexThreadRoutine(PVOID context) {
+	MutexContext* ctx = (MutexContext*)context;
+	LARGE_INTEGER timeout = { 0 };
+	LARGE_INTEGER delay = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
+
+	timeout.QuadPart = -500000000LL;
+	st = KeWaitForSingleObject(ctx->pMutex, Executive, KernelMode, FALSE, &timeout);
+
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[E] Thread %d Timeout\n", ctx->threadIndex);
+		ExFreePool(ctx);
+		PsTerminateSystemThread(st);
+		return;
+	}
+
+	DbgPrint("[W] Thread %d Is Working\n", ctx->threadIndex);
+
+	*ctx->sharePointer += 1;
+
+	DbgPrint("[W] shareValue Is %d\n", *ctx->sharePointer);
+
+	delay.QuadPart = -2000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+	
+	KeReleaseMutex(ctx->pMutex, FALSE);
+	DbgPrint("[W] Thread %d KeReleaseMutex Success\n", ctx->threadIndex);
+	
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+NTSTATUS TestMutex() {
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+	HANDLE threadHandle[TEST_THREAD_COUNT] = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	LONG shareValue = 0;
+	NTSTATUS st = STATUS_SUCCESS;
+	KMUTEX kmutex = { 0 };
+	MutexContext* ctx[TEST_THREAD_COUNT] = { 0 };
+
+	KeInitializeMutex(&kmutex, 0);
+
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		ctx[i] = (MutexContext*)ExAllocatePool(NonPagedPool, sizeof(MutexContext));
+		if (!ctx[i]) {
+			st = STATUS_INSUFFICIENT_RESOURCES;
+			goto ret;
+		}
+
+		ctx[i]->pMutex = &kmutex;
+		ctx[i]->threadIndex = i;
+		ctx[i]->sharePointer = &shareValue;
+
+		st = PsCreateSystemThread(
+			&threadHandle[i],
+			THREAD_ALL_ACCESS,
+			&objAttr,
+			NULL,
+			NULL,
+			MutexThreadRoutine,
+			ctx[i]
+		);
+		if (!NT_SUCCESS(st)) {
+			DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", i, st);
+			goto ret;
+		}
+	}
+
+ret:
+	timeout.QuadPart = -100000000LL;
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) {
+			ZwWaitForSingleObject(threadHandle[i], FALSE, NULL);
+		}
+	}
+
+	// Close handles and free contexts
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) ZwClose(threadHandle[i]);
+	}
+	return st;
+}
+
+typedef struct {
+	PERESOURCE pResource;
+	int threadIndex;
+	PLONG sharePointer;
+}ResourceContext;
+
+VOID ResourceReadThreadRoutine(PVOID context) {
+	ResourceContext* ctx = (ResourceContext*)context;
+	LARGE_INTEGER delay = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] ReadThread %d Is Waiting\n", ctx->threadIndex);
+
+	ExAcquireResourceSharedLite(ctx->pResource, TRUE);
+
+	DbgPrint("[W] ReadThread %d Is Working\n", ctx->threadIndex);
+
+	DbgPrint("[W] shareValue Is %d\n", *ctx->sharePointer);
+
+	delay.QuadPart = -2000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	ExReleaseResourceLite(ctx->pResource);
+	DbgPrint("[W] ReadThread %d ExReleaseResourceLite Success\n", ctx->threadIndex);
+
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+VOID ResourceWriteThreadRoutine(PVOID context) {
+	ResourceContext* ctx = (ResourceContext*)context;
+	LARGE_INTEGER delay = { 0 };
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
+
+	ExAcquireResourceExclusiveLite(ctx->pResource, TRUE);
+
+	DbgPrint("[W] Thread %d Is Working\n", ctx->threadIndex);
+
+	*ctx->sharePointer += 1;
+
+	DbgPrint("[W] shareValue Is %d\n", *ctx->sharePointer);
+
+	delay.QuadPart = -2000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	ExReleaseResourceLite(ctx->pResource);
+	DbgPrint("[W] Thread %d ExReleaseResourceLite Success\n", ctx->threadIndex);
+
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+NTSTATUS TestResourceLite() {
+	NTSTATUS st = STATUS_SUCCESS;
+	ERESOURCE resource = { 0 };
+	HANDLE threadHandle[TEST_THREAD_COUNT + 1] = { 0 };
+	ResourceContext* ctx[TEST_THREAD_COUNT + 1] = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	LONG shareValue = 0;
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+
+	st = ExInitializeResourceLite(&resource);
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[W] ExInitializeResourceLite Failed->%lX\n", st);
+		goto ret;
+	}
+
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		ctx[i] = (ResourceContext*)ExAllocatePool(NonPagedPool, sizeof(ResourceContext));
+		if (!ctx[i]) {
+			st = STATUS_INSUFFICIENT_RESOURCES;
+			goto ret;
+		}
+
+		ctx[i]->pResource = &resource;
+		ctx[i]->threadIndex = i;
+		ctx[i]->sharePointer = &shareValue;
+
+		st = PsCreateSystemThread(
+			&threadHandle[i],
+			THREAD_ALL_ACCESS,
+			&objAttr,
+			NULL,
+			NULL,
+			ResourceWriteThreadRoutine,
+			ctx[i]
+		);
+		if (!NT_SUCCESS(st)) {
+			DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", i, st);
+			goto ret;
+		}
+	}
+
+	ctx[TEST_THREAD_COUNT] = (ResourceContext*)ExAllocatePool(NonPagedPool, sizeof(ResourceContext));
+	if (!ctx[TEST_THREAD_COUNT]) {
+		st = STATUS_INSUFFICIENT_RESOURCES;
+		goto ret;
+	}
+
+	ctx[TEST_THREAD_COUNT]->pResource = &resource;
+	ctx[TEST_THREAD_COUNT]->threadIndex = 91;
+	ctx[TEST_THREAD_COUNT]->sharePointer = &shareValue;
+
+	st = PsCreateSystemThread(
+		&threadHandle[TEST_THREAD_COUNT],
+		THREAD_ALL_ACCESS,
+		&objAttr,
+		NULL,
+		NULL,
+		ResourceReadThreadRoutine,
+		ctx[TEST_THREAD_COUNT]
+	);
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", TEST_THREAD_COUNT, st);
+		goto ret;
+	}
+
+ret:
+	timeout.QuadPart = -100000000LL;
+	for (int i = 0; i <= TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) {
+			ZwWaitForSingleObject(threadHandle[i], FALSE, NULL);
+		}
+	}
+
+	// Close handles and free contexts
+	for (int i = 0; i <= TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) ZwClose(threadHandle[i]);
+	}
+	ExDeleteResourceLite(&resource);
+	return st;
+}
+
+typedef struct {
+	PKSPIN_LOCK pSpinlock;
+	int threadIndex;
+	PLONG sharePointer;
+}SpinlockContext;
+
+VOID SpinlockNormalRoutine(PVOID context) {
+	SpinlockContext* ctx = (SpinlockContext*)context;
+	LARGE_INTEGER delay = { 0 };
+	KIRQL oldIrql = 0;
+	NTSTATUS st = STATUS_SUCCESS;
+
+	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
+
+	KeAcquireSpinLock(ctx->pSpinlock, &oldIrql);
+
+	DbgPrint("[W] Thread %d Is Working old IRQL:%d new IRQL:%d\n", ctx->threadIndex,oldIrql,KeGetCurrentIrql());
+
+	*ctx->sharePointer += 1;
+
+	DbgPrint("[W] shareValue Is %d\n", *ctx->sharePointer);
+
+	KeReleaseSpinLock(ctx->pSpinlock, oldIrql);
+
+	delay.QuadPart = -2000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	DbgPrint("[W] Thread %d KeReleaseSpinLock Success\n", ctx->threadIndex);
+
+	ExFreePool(ctx);
+	PsTerminateSystemThread(st);
+	return;
+}
+
+NTSTATUS TestSpinlockNormal() {
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+	HANDLE threadHandle[TEST_THREAD_COUNT] = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	LONG shareValue = 0;
+	NTSTATUS st = STATUS_SUCCESS;
+	KSPIN_LOCK kspinlock = { 0 };
+	SpinlockContext* ctx[TEST_THREAD_COUNT] = { 0 };
+
+	KeInitializeSpinLock(&kspinlock);
+	
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		ctx[i] = (SpinlockContext*)ExAllocatePool(NonPagedPool, sizeof(SpinlockContext));
+		if (!ctx[i]) {
+			st = STATUS_INSUFFICIENT_RESOURCES;
+			goto ret;
+		}
+
+		ctx[i]->pSpinlock = &kspinlock;
+		ctx[i]->threadIndex = i;
+		ctx[i]->sharePointer = &shareValue;
+
+		st = PsCreateSystemThread(
+			&threadHandle[i],
+			THREAD_ALL_ACCESS,
+			&objAttr,
+			NULL,
+			NULL,
+			SpinlockNormalRoutine,
+			ctx[i]
+		);
+		if (!NT_SUCCESS(st)) {
+			DbgPrint("[E] PsCreateSystemThread%d Failed->%lX\n", i, st);
+			goto ret;
+		}
+	}
+
+ret:
+	timeout.QuadPart = -100000000LL;
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) {
+			ZwWaitForSingleObject(threadHandle[i], FALSE, NULL);
+		}
+	}
+
+	// Close handles and free contexts
+	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
+		if (threadHandle[i] != NULL) ZwClose(threadHandle[i]);
+	}
+	return st;
+}
+
+typedef struct {
+	INT threadIndex;
+	volatile LONG executeCount;
+	KTIMER ktimer;
+	KDPC kdpc;
+}TimerContext;
+
+VOID TimerDpcRoutine(KDPC* Dpc, PVOID DeferredContext, PVOID SystemArgument1, PVOID SystemArgument2) {
+	TimerContext* ctx = (TimerContext*)DeferredContext;
+	KIRQL currentIrql = 0;
+	LONG count = 0;
+
+	count = InterlockedIncrement(&ctx->executeCount);
+	currentIrql = KeGetCurrentIrql();
+	DbgPrint("[W] CurrentIrql->%d ExecuteCount->%d\n", currentIrql, count);
+}
+
+NTSTATUS TestTimerOneShot() {
+	TimerContext ctx = { 0 };
+	LARGE_INTEGER dueTime = { 0 };
+	LARGE_INTEGER delay = { 0 };
+
+	KeInitializeTimer(&ctx.ktimer);
+	KeInitializeDpc(&ctx.kdpc, TimerDpcRoutine, &ctx);
+	
+	dueTime.QuadPart = -20000000LL;
+	KeSetTimer(&ctx.ktimer, dueTime, &ctx.kdpc);
+
+	delay.QuadPart = -100000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	KeCancelTimer(&ctx.ktimer);
+	DbgPrint("[W] ExecuteCount->%d\n", ctx.executeCount);
+
+	return STATUS_SUCCESS;
+}
+
+NTSTATUS TestTimerPeriod() {
+	TimerContext ctx = { 0 };
+	LARGE_INTEGER dueTime = { 0 };
+	LARGE_INTEGER delay = { 0 };
+
+	KeInitializeTimer(&ctx.ktimer);
+	KeInitializeDpc(&ctx.kdpc, TimerDpcRoutine, &ctx);
+
+	dueTime.QuadPart = -20000000LL;
+	KeSetTimerEx(&ctx.ktimer, dueTime, 1000, &ctx.kdpc);
+
+	delay.QuadPart = -100000000LL;
+	KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+	KeCancelTimer(&ctx.ktimer);
+	DbgPrint("[W] ExecuteCount->%d\n", ctx.executeCount);
+
+	return STATUS_SUCCESS;
+}
+
 VOID DriverUnload(PDRIVER_OBJECT driverObject) {
 	
 	LARGE_INTEGER delay = { 0 };
@@ -257,6 +912,14 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING regPath) {
 
 	//TestThreadObjectAndId();
 	//TestCreateSystemThread();
-	TestAttachThread();
+	//TestAttachThread();
+	//TestEventNotification();
+	//TestEventSynchronization();
+	//TestSemaphore();
+	//TestMutex();
+	//TestResourceLite();
+	//TestSpinlockNormal();
+	//TestTimerOneShot();
+	//TestTimerPeriod();
 	return st;
 }
