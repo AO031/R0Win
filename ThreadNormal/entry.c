@@ -896,6 +896,176 @@ NTSTATUS TestTimerPeriod() {
 	return STATUS_SUCCESS;
 }
 
+typedef enum _KAPC_ENVIRONMENT {
+	OriginalApcEnvironment,
+	AttachedApcEnvironment,
+	CurrentApcEnvironment,
+	InsertApcEnvironment
+} KAPC_ENVIRONMENT;
+
+typedef
+VOID
+(*PKNORMAL_ROUTINE) (
+	IN PVOID NormalContext,
+	IN PVOID SystemArgument1,
+	IN PVOID SystemArgument2
+	);
+
+typedef
+VOID
+(*PKKERNEL_ROUTINE) (
+	IN struct _KAPC* Apc,
+	IN OUT PKNORMAL_ROUTINE* NormalRoutine,
+	IN OUT PVOID* NormalContext,
+	IN OUT PVOID* SystemArgument1,
+	IN OUT PVOID* SystemArgument2
+	);
+
+typedef
+VOID
+(*PKRUNDOWN_ROUTINE) (
+	IN struct _KAPC* Apc
+	);
+
+NTKERNELAPI
+VOID
+KeInitializeApc(
+	__out PRKAPC Apc,
+	__in PRKTHREAD Thread,
+	__in KAPC_ENVIRONMENT Environment,
+	__in PKKERNEL_ROUTINE KernelRoutine,
+	__in_opt PKRUNDOWN_ROUTINE RundownRoutine,
+	__in_opt PKNORMAL_ROUTINE NormalRoutine,
+	__in_opt KPROCESSOR_MODE ApcMode,
+	__in_opt PVOID NormalContext
+);
+
+NTKERNELAPI
+BOOLEAN
+KeInsertQueueApc(
+	__inout PRKAPC Apc,
+	__in_opt PVOID SystemArgument1,
+	__in_opt PVOID SystemArgument2,
+	__in KPRIORITY Increment
+);
+
+typedef struct {
+	KAPC apc;
+	KEVENT completeEvent;
+}KernelApcContext;
+
+VOID
+KernelApcRoutine (
+	IN struct _KAPC* Apc,
+	IN OUT PKNORMAL_ROUTINE* NormalRoutine,
+	IN OUT PVOID* NormalContext,
+	IN OUT PVOID* SystemArgument1,
+	IN OUT PVOID* SystemArgument2
+) {
+
+	KernelApcContext* ctx = CONTAINING_RECORD(Apc, KernelApcContext, apc);
+	DbgPrint("[W] Apc Routine Is Working Tid:%d\n",PsGetCurrentThreadId());
+	KeSetEvent(&ctx->completeEvent, IO_NO_INCREMENT, FALSE);
+}
+
+VOID KernelApcThreadRoutine(PVOID context) {
+	LARGE_INTEGER delay = { 0 };
+
+	DbgPrint("[W] Target Thread Is Starting\n");
+
+	for (int i = 0; i < 10; i++) {
+		DbgPrint("[W] Target Thread Is Working %d Tid %d\n", i, PsGetCurrentThreadId());
+		delay.QuadPart = -10000000LL;
+		KeDelayExecutionThread(KernelMode, FALSE, &delay);
+	}
+
+	DbgPrint("[W] Target Thread Is Ending\n");
+
+	PsTerminateSystemThread(STATUS_SUCCESS);
+	return;
+}
+
+NTSTATUS TestKernelApc() {
+	HANDLE threadHandle = NULL;
+	NTSTATUS st = STATUS_SUCCESS;
+	OBJECT_ATTRIBUTES objAttr = { 0 };
+	LARGE_INTEGER timeout = { 0 };
+	BOOLEAN inserted = FALSE;
+	PETHREAD threadObject = NULL;
+	KernelApcContext ctx = { 0 };
+
+	KeInitializeEvent(&ctx.completeEvent, NotificationEvent, FALSE);
+
+	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+	st = PsCreateSystemThread(
+		&threadHandle,
+		THREAD_ALL_ACCESS,
+		&objAttr,
+		NULL,
+		NULL,
+		KernelApcThreadRoutine,
+		NULL
+	);
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[W] PsCreateSystemThread Failed->%lX\n", st);
+		goto ret;
+	}
+
+	st = ObReferenceObjectByHandle(
+		threadHandle,
+		THREAD_ALL_ACCESS,
+		*PsThreadType,
+		KernelMode,
+		&threadObject,
+		NULL
+	);
+	if (!NT_SUCCESS(st)) {
+		DbgPrint("[W] ObReferenceObjectByHandle Failed->%lX\n", st);
+		goto ret;
+	}
+
+	KeInitializeApc(
+		&ctx.apc,
+		threadObject,
+		OriginalApcEnvironment,
+		KernelApcRoutine,
+		NULL,
+		NULL,
+		KernelMode,
+		NULL
+	);
+
+	inserted = KeInsertQueueApc(
+		&ctx.apc,
+		NULL,
+		NULL,
+		IO_NO_INCREMENT
+	);
+
+	if (inserted) {
+		DbgPrint("[W] Apc Insert Success\n");
+		timeout.QuadPart = -200000000LL;
+		st = KeWaitForSingleObject(
+			&ctx.completeEvent,
+			Executive,
+			KernelMode,
+			FALSE,
+			&timeout
+		);
+		if (NT_SUCCESS(st)) DbgPrint("[W] Apc Is Running\n");
+	}
+
+ret:
+	if (threadObject) ObDereferenceObject(threadObject);
+	if (threadHandle) {
+		timeout.QuadPart = -200000000LL;
+		ZwWaitForSingleObject(threadHandle, FALSE, &timeout);
+		ZwClose(threadHandle);
+	}
+	return st;
+}
+
 VOID DriverUnload(PDRIVER_OBJECT driverObject) {
 	
 	LARGE_INTEGER delay = { 0 };
@@ -921,5 +1091,6 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING regPath) {
 	//TestSpinlockNormal();
 	//TestTimerOneShot();
 	//TestTimerPeriod();
+	TestKernelApc();
 	return st;
 }
