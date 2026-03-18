@@ -752,20 +752,20 @@ ret:
 }
 
 typedef struct {
-	PKSPIN_LOCK pSpinlock;
+	PKSPIN_LOCK pSpinLock;
 	int threadIndex;
 	PLONG sharePointer;
-}SpinlockContext;
+}SpinLockContext;
 
-VOID SpinlockNormalRoutine(PVOID context) {
-	SpinlockContext* ctx = (SpinlockContext*)context;
+VOID SpinLockNormalRoutine(PVOID context) {
+	SpinLockContext* ctx = (SpinLockContext*)context;
 	LARGE_INTEGER delay = { 0 };
 	KIRQL oldIrql = 0;
 	NTSTATUS st = STATUS_SUCCESS;
 
 	DbgPrint("[W] Thread %d Is Waiting\n", ctx->threadIndex);
 
-	KeAcquireSpinLock(ctx->pSpinlock, &oldIrql);
+	KeAcquireSpinLock(ctx->pSpinLock, &oldIrql);
 
 	DbgPrint("[W] Thread %d Is Working old IRQL:%d new IRQL:%d\n", ctx->threadIndex,oldIrql,KeGetCurrentIrql());
 
@@ -773,7 +773,7 @@ VOID SpinlockNormalRoutine(PVOID context) {
 
 	DbgPrint("[W] shareValue Is %d\n", *ctx->sharePointer);
 
-	KeReleaseSpinLock(ctx->pSpinlock, oldIrql);
+	KeReleaseSpinLock(ctx->pSpinLock, oldIrql);
 
 	delay.QuadPart = -2000000LL;
 	KeDelayExecutionThread(KernelMode, FALSE, &delay);
@@ -791,21 +791,21 @@ NTSTATUS TestSpinlockNormal() {
 	LARGE_INTEGER timeout = { 0 };
 	LONG shareValue = 0;
 	NTSTATUS st = STATUS_SUCCESS;
-	KSPIN_LOCK kspinlock = { 0 };
-	SpinlockContext* ctx[TEST_THREAD_COUNT] = { 0 };
+	KSPIN_LOCK kspinLock = { 0 };
+	SpinLockContext* ctx[TEST_THREAD_COUNT] = { 0 };
 
-	KeInitializeSpinLock(&kspinlock);
+	KeInitializeSpinLock(&kspinLock);
 	
 	InitializeObjectAttributes(&objAttr, NULL, OBJ_KERNEL_HANDLE, NULL, NULL);
 
 	for (int i = 0; i < TEST_THREAD_COUNT; i++) {
-		ctx[i] = (SpinlockContext*)ExAllocatePool(NonPagedPool, sizeof(SpinlockContext));
+		ctx[i] = (SpinLockContext*)ExAllocatePool(NonPagedPool, sizeof(SpinLockContext));
 		if (!ctx[i]) {
 			st = STATUS_INSUFFICIENT_RESOURCES;
 			goto ret;
 		}
 
-		ctx[i]->pSpinlock = &kspinlock;
+		ctx[i]->pSpinLock = &kspinLock;
 		ctx[i]->threadIndex = i;
 		ctx[i]->sharePointer = &shareValue;
 
@@ -815,7 +815,7 @@ NTSTATUS TestSpinlockNormal() {
 			&objAttr,
 			NULL,
 			NULL,
-			SpinlockNormalRoutine,
+			SpinLockNormalRoutine,
 			ctx[i]
 		);
 		if (!NT_SUCCESS(st)) {
