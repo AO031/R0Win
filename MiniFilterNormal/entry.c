@@ -5,13 +5,13 @@
 #include <suppress.h>
 
 // ==============================================================================
-// ==============================================================================
 typedef struct _STATISTICS_INFO {
     ULONGLONG createCount;
     ULONGLONG readCount;
     ULONGLONG writeCount;
     ULONGLONG setInfoCount;
     ULONGLONG cleanupCount;
+    ULONGLONG closeCount;
     ULONGLONG filteredCount;
     ULONGLONG totalCount;
     ULONGLONG protectedCount;
@@ -20,16 +20,52 @@ typedef struct _STATISTICS_INFO {
 
 
 // ==============================================================================
+STATISTICS_INFO g_statistics = { 0 };
+PFLT_FILTER g_filterHandle = NULL;
+CONST PWCHAR g_protectedFiles[] = {
+    L"\\Device\\HarddiskVolume1\\123.txt\0"
+};
+#define PROTECTED_FILE_COUNT sizeof(g_protectedFiles) / sizeof(PWCHAR)
 
+// ==============================================================================
+FLT_PREOP_CALLBACK_STATUS PreOperationCallback(PFLT_CALLBACK_DATA Data, PCFLT_RELATED_OBJECTS FltObjects, PVOID* CompletionContext);
+
+NTSTATUS MyFltUnload(FLT_FILTER_UNLOAD_FLAGS Flags);
+NTSTATUS InstanceSetupCallback(PCFLT_RELATED_OBJECTS FltObjects,FLT_INSTANCE_SETUP_FLAGS Flags,ULONG VolumeDeviceType,FLT_FILESYSTEM_TYPE VolumeFilesystemType);
+NTSTATUS InstanceQueryTeardownCallback(PCFLT_RELATED_OBJECTS FltObjects, FLT_INSTANCE_QUERY_TEARDOWN_FLAGS Flags);
+
+CONST FLT_OPERATION_REGISTRATION CallBacks[] = {
+    {IRP_MJ_CREATE,0,PreOperationCallback,NULL,NULL},
+    {IRP_MJ_READ,0,PreOperationCallback,NULL,NULL},
+    {IRP_MJ_WRITE,0,PreOperationCallback,NULL,NULL},
+    {IRP_MJ_SET_INFORMATION,0,PreOperationCallback,NULL,NULL},
+    {IRP_MJ_CLEANUP,0,PreOperationCallback,NULL,NULL},
+    {IRP_MJ_CLOSE,0,PreOperationCallback,NULL,NULL},
+    {IRP_MJ_OPERATION_END}
+};
+
+CONST FLT_REGISTRATION FilterRegisteration = {
+    sizeof(FLT_REGISTRATION),
+    FLT_REGISTRATION_VERSION,
+    0,
+    NULL,
+    CallBacks,
+    MyFltUnload,
+    InstanceSetupCallback,
+    InstanceQueryTeardownCallback,
+    NULL,
+    NULL,
+    NULL,NULL,NULL
+};
 
 // ==============================================================================
 NTSTATUS InitRegConfig(PUNICODE_STRING regPath);
 NTSTATUS ExtractServiceName(PUNICODE_STRING regPath, WCHAR* serviceName, ULONG bufferSize);
 NTSTATUS SetupRegConfig(PUNICODE_STRING regPath, WCHAR* serviceName);
+BOOLEAN IsProtectFile(PUNICODE_STRING filePath);
 
 NTSTATUS DriverEntry(PDRIVER_OBJECT driverObj, PUNICODE_STRING regPath);
 VOID DriverUnload(PDRIVER_OBJECT driverObj);
-
 
 // ==============================================================================
 NTSTATUS DriverEntry(PDRIVER_OBJECT driverObj, PUNICODE_STRING regPath) {
@@ -41,13 +77,23 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObj, PUNICODE_STRING regPath) {
         return st;
     }
 
-	driverObj->DriverUnload = DriverUnload;
+    RtlZeroMemory(&g_statistics, sizeof(STATISTICS_INFO));
+    KeQuerySystemTime(&g_statistics.startTime);
+    
+    st = FltRegisterFilter(driverObj,&FilterRegisteration,&g_filterHandle);
+    if (!NT_SUCCESS(st)) {
+        DbgPrint("[E] InitRegConfig Failed->%lX\n", st);
+        return st;
+    }
 
+    st = FltStartFiltering(g_filterHandle);
+    if (!NT_SUCCESS(st)) {
+        DbgPrint("[E] InitRegConfig Failed->%lX\n", st);
+        return st;
+    }
+    
+    DbgPrint("[W] DriverEntry Success\n");
 	return st;
-}
-
-VOID DriverUnload(PDRIVER_OBJECT driverObj) {
-
 }
 
 NTSTATUS InitRegConfig(PUNICODE_STRING regPath) {
@@ -65,7 +111,6 @@ NTSTATUS InitRegConfig(PUNICODE_STRING regPath) {
         DbgPrint("[E] ExtractServiceName Failed->%lX\n", st);
         return st;
     }
-
 
     return st;
 }
@@ -225,7 +270,7 @@ NTSTATUS SetupRegConfig(PUNICODE_STRING regPath, WCHAR* serviceName) {
         &valueName,
         0,
         REG_DWORD,
-        (PVOID)flags,
+        (PVOID)&flags,
         (ULONG)sizeof(ULONG)
     );
     if (!NT_SUCCESS(st)) {
@@ -239,4 +284,119 @@ ret:
     if (hInstancesKey) ZwClose(hInstancesKey);
     return st;
 
+}
+
+FLT_PREOP_CALLBACK_STATUS PreOperationCallback(PFLT_CALLBACK_DATA Data, PCFLT_RELATED_OBJECTS FltObjects, PVOID* CompletionContext) {
+    PFLT_FILE_NAME_INFORMATION nameInfo = NULL;
+    NTSTATUS st = STATUS_SUCCESS;
+    WCHAR* operationName = L"UNKNOWN\0";
+    BOOLEAN isProtected = FALSE;
+
+    InterlockedIncrement64(&g_statistics.totalCount);
+
+    st = FltGetFileNameInformation(Data,FLT_FILE_NAME_NORMALIZED | FLT_FILE_NAME_QUERY_DEFAULT,&nameInfo);
+    if (!NT_SUCCESS(st)) {
+        //DbgPrint("[E] FltGetFileNameInformation Failed:%lX\n", st);
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+    
+    st = FltParseFileNameInformation(nameInfo);
+    if (!NT_SUCCESS(st)) {
+        DbgPrint("[E] FltParseFileNameInformation Failed:%lX\n", st);
+        FltReleaseFileNameInformation(nameInfo);
+        return FLT_PREOP_SUCCESS_NO_CALLBACK;
+    }
+
+    switch (Data->Iopb->MajorFunction) {
+    case IRP_MJ_CREATE: {
+        operationName = L"CREATE";
+        InterlockedIncrement64(&g_statistics.createCount);
+        break;
+    }
+    case IRP_MJ_READ: {
+        operationName = L"READ";
+        InterlockedIncrement64(&g_statistics.readCount);
+        break;
+    }
+    case IRP_MJ_WRITE: {
+        operationName = L"WRITE";
+        InterlockedIncrement64(&g_statistics.writeCount);
+        break;
+    }
+    case IRP_MJ_SET_INFORMATION: {
+        operationName = L"SETINFO";
+        InterlockedIncrement64(&g_statistics.setInfoCount);
+        break;
+    }
+    case IRP_MJ_CLEANUP: {
+        operationName = L"CLEANUP";
+        InterlockedIncrement64(&g_statistics.cleanupCount);
+        break;
+    }
+    case IRP_MJ_CLOSE: {
+        operationName = L"CLOSE";
+        InterlockedIncrement64(&g_statistics.closeCount);
+        break;
+    }
+    }
+
+    //DbgPrint("[W] %ws | PID:%p | %wZ\n", operationName, PsGetCurrentProcessId(), &nameInfo->Name);
+   
+    if (IsProtectFile(&nameInfo->Name)) {
+        InterlockedIncrement64(&g_statistics.protectedCount);
+        DbgPrint("[W] Protected File\n");
+        Data->IoStatus.Status = STATUS_ACCESS_DENIED;
+        Data->IoStatus.Information = 0;
+        FltReleaseFileNameInformation(nameInfo);
+        return FLT_PREOP_COMPLETE;
+    }
+
+    FltReleaseFileNameInformation(nameInfo);
+
+    return FLT_PREOP_SUCCESS_NO_CALLBACK;
+}
+
+NTSTATUS MyFltUnload(FLT_FILTER_UNLOAD_FLAGS Flags) {
+    LARGE_INTEGER currentTime = { 0 };
+    LARGE_INTEGER runTime = { 0 };
+    ULONGLONG totalOps = 0;
+    
+    KeQuerySystemTime(&currentTime);
+    runTime.QuadPart = currentTime.QuadPart - g_statistics.startTime.QuadPart;
+    totalOps = g_statistics.cleanupCount + g_statistics.readCount + g_statistics.writeCount
+        + g_statistics.createCount + g_statistics.setInfoCount + g_statistics.closeCount
+        + g_statistics.protectedCount + g_statistics.filteredCount;
+
+    DbgPrint("\n");
+    DbgPrint("==================================================\n");
+    DbgPrint("[W] FltUnloadCallback\n");
+    DbgPrint("[W] CREATE:%llX\n", g_statistics.createCount);
+    DbgPrint("[W] READ:%llX\n", g_statistics.readCount);
+    DbgPrint("[W] PROTECTED:%llX\n", g_statistics.protectedCount);
+    DbgPrint("[W] TOTAl:%llX\n", totalOps);
+    DbgPrint("==================================================\n");
+
+    FltUnregisterFilter(g_filterHandle);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS InstanceSetupCallback(PCFLT_RELATED_OBJECTS FltObjects, FLT_INSTANCE_SETUP_FLAGS Flags, ULONG VolumeDeviceType, FLT_FILESYSTEM_TYPE VolumeFilesystemType) {
+    return (VolumeFilesystemType == FLT_FSTYPE_NTFS || VolumeFilesystemType == FLT_FSTYPE_FAT || VolumeFilesystemType == FLT_FSTYPE_EXFAT || VolumeFilesystemType == FLT_FSTYPE_REFS) ? STATUS_SUCCESS : STATUS_FLT_DO_NOT_ATTACH;
+}
+ 
+NTSTATUS InstanceQueryTeardownCallback(PCFLT_RELATED_OBJECTS FltObjects, FLT_INSTANCE_QUERY_TEARDOWN_FLAGS Flags) {
+    return STATUS_SUCCESS;
+}
+
+BOOLEAN IsProtectFile(PUNICODE_STRING filePath) {
+    if (!filePath || !filePath->Length) return FALSE;
+    UNICODE_STRING uniPath = { 0 };
+    for (int i = 0; i < PROTECTED_FILE_COUNT; i++) {
+        RtlInitUnicodeString(g_protectedFiles[i], &uniPath);
+        if (RtlCompareUnicodeString(filePath, &uniPath,TRUE) == 0) {
+            return TRUE;
+        }
+    }
+
+    return FALSE;
 }
